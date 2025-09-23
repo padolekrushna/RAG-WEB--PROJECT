@@ -1,0 +1,75 @@
+# backend/requirements.txt
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+pydantic==2.5.0
+pydantic-settings==2.1.0
+google-generativeai==0.3.2
+faiss-cpu==1.7.4
+numpy>=1.26.2
+pandas==2.0.3
+PyPDF2==3.0.1
+python-docx==0.8.11
+scikit-learn>=1.0.0
+python-dotenv==1.0.0
+aiofiles==0.24.0
+azure-storage-blob==12.19.0
+azure-identity==1.15.0
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# backend/Dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first for better caching
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY . .
+
+# Create directories for storage
+RUN mkdir -p storage/uploads storage/indexes storage/logs
+
+# Expose port
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Run the application
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# backend/.env.example
+# API Configuration
+PROJECT_NAME=RAG Document Q&A API
+API_V1_STR=/api/v1
+
+# CORS Origins (comma-separated)
+ALLOWED_ORIGINS=http://localhost:3000,http://localhost:8080,https://your-domain.com
+
+# Google Gemini API
+GOOGLE_API_KEY=your_gemini_api_key_here
+
+# Azure Configuration
+AZURE_STORAGE_CONNECTION_STRING=your_azure_storage_connection_string
+AZURE_CONTAINER_NAME=rag-documents
+
+# File Upload Configuration
+MAX_FILE_SIZE=52428800
+UPLOAD_DIR=storage/uploads
+INDEX_DIR=storage/indexes
+
+# Database (optional for future use)
+DATABASE_URL=sqlite:///./storage/rag_system.db
