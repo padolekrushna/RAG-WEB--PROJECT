@@ -1,0 +1,242 @@
+
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "appName": {
+            "type": "string",
+            "defaultValue": "rag-document-qa",
+            "metadata": {
+                "description": "Name of the application"
+            }
+        },
+        "location": {
+            "type": "string",
+            "defaultValue": "[resourceGroup().location]",
+            "metadata": {
+                "description": "Location for all resources"
+            }
+        },
+        "containerImageTag": {
+            "type": "string",
+            "defaultValue": "latest",
+            "metadata": {
+                "description": "Container image tag"
+            }
+        }
+    },
+    "variables": {
+        "containerRegistryName": "[concat(parameters('appName'), 'acr', uniqueString(resourceGroup().id))]",
+        "containerAppEnvironmentName": "[concat(parameters('appName'), '-env')]",
+        "backendAppName": "[concat(parameters('appName'), '-backend')]",
+        "frontendAppName": "[concat(parameters('appName'), '-frontend')]",
+        "storageAccountName": "[concat(replace(parameters('appName'), '-', ''), 'storage', uniqueString(resourceGroup().id))]",
+        "logAnalyticsWorkspaceName": "[concat(parameters('appName'), '-logs')]"
+    },
+    "resources": [
+        {
+            "type": "Microsoft.Storage/storageAccounts",
+            "apiVersion": "2023-01-01",
+            "name": "[variables('storageAccountName')]",
+            "location": "[parameters('location')]",
+            "sku": {
+                "name": "Standard_LRS"
+            },
+            "kind": "StorageV2",
+            "properties": {
+                "accessTier": "Hot",
+                "allowBlobPublicAccess": true
+            }
+        },
+        {
+            "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+            "apiVersion": "2023-01-01",
+            "name": "[concat(variables('storageAccountName'), '/default/rag-documents')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName'))]"
+            ],
+            "properties": {
+                "publicAccess": "None"
+            }
+        },
+        {
+            "type": "Microsoft.ContainerRegistry/registries",
+            "apiVersion": "2023-07-01",
+            "name": "[variables('containerRegistryName')]",
+            "location": "[parameters('location')]",
+            "sku": {
+                "name": "Basic"
+            },
+            "properties": {
+                "adminUserEnabled": true
+            }
+        },
+        {
+            "type": "Microsoft.OperationalInsights/workspaces",
+            "apiVersion": "2022-10-01",
+            "name": "[variables('logAnalyticsWorkspaceName')]",
+            "location": "[parameters('location')]",
+            "properties": {
+                "sku": {
+                    "name": "PerGB2018"
+                }
+            }
+        },
+        {
+            "type": "Microsoft.App/managedEnvironments",
+            "apiVersion": "2023-05-01",
+            "name": "[variables('containerAppEnvironmentName')]",
+            "location": "[parameters('location')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.OperationalInsights/workspaces', variables('logAnalyticsWorkspaceName'))]"
+            ],
+            "properties": {
+                "appLogsConfiguration": {
+                    "destination": "log-analytics",
+                    "logAnalyticsConfiguration": {
+                        "customerId": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', variables('logAnalyticsWorkspaceName'))).customerId]",
+                        "sharedKey": "[listKeys(resourceId('Microsoft.OperationalInsights/workspaces', variables('logAnalyticsWorkspaceName')), '2022-10-01').primarySharedKey]"
+                    }
+                }
+            }
+        },
+        {
+            "type": "Microsoft.App/containerApps",
+            "apiVersion": "2023-05-01",
+            "name": "[variables('backendAppName')]",
+            "location": "[parameters('location')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.App/managedEnvironments', variables('containerAppEnvironmentName'))]",
+                "[resourceId('Microsoft.ContainerRegistry/registries', variables('containerRegistryName'))]",
+                "[resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName'))]"
+            ],
+            "properties": {
+                "managedEnvironmentId": "[resourceId('Microsoft.App/managedEnvironments', variables('containerAppEnvironmentName'))]",
+                "configuration": {
+                    "ingress": {
+                        "external": true,
+                        "targetPort": 8000,
+                        "allowInsecure": false
+                    },
+                    "registries": [
+                        {
+                            "server": "[concat(variables('containerRegistryName'), '.azurecr.io')]",
+                            "username": "[variables('containerRegistryName')]",
+                            "passwordSecretRef": "registry-password"
+                        }
+                    ],
+                    "secrets": [
+                        {
+                            "name": "registry-password",
+                            "value": "[listCredentials(resourceId('Microsoft.ContainerRegistry/registries', variables('containerRegistryName')), '2023-07-01').passwords[0].value]"
+                        },
+                        {
+                            "name": "storage-connection-string",
+                            "value": "[concat('DefaultEndpointsProtocol=https;AccountName=', variables('storageAccountName'), ';AccountKey=', listKeys(resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName')), '2023-01-01').keys[0].value)]"
+                        }
+                    ]
+                },
+                "template": {
+                    "containers": [
+                        {
+                            "name": "backend",
+                            "image": "[concat(variables('containerRegistryName'), '.azurecr.io/rag-backend:', parameters('containerImageTag'))]",
+                            "env": [
+                                {
+                                    "name": "AZURE_STORAGE_CONNECTION_STRING",
+                                    "secretRef": "storage-connection-string"
+                                },
+                                {
+                                    "name": "AZURE_CONTAINER_NAME",
+                                    "value": "rag-documents"
+                                }
+                            ],
+                            "resources": {
+                                "cpu": 1.0,
+                                "memory": "2Gi"
+                            }
+                        }
+                    ],
+                    "scale": {
+                        "minReplicas": 1,
+                        "maxReplicas": 3
+                    }
+                }
+            }
+        },
+        {
+            "type": "Microsoft.App/containerApps",
+            "apiVersion": "2023-05-01",
+            "name": "[variables('frontendAppName')]",
+            "location": "[parameters('location')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.App/managedEnvironments', variables('containerAppEnvironmentName'))]",
+                "[resourceId('Microsoft.ContainerRegistry/registries', variables('containerRegistryName'))]",
+                "[resourceId('Microsoft.App/containerApps', variables('backendAppName'))]"
+            ],
+            "properties": {
+                "managedEnvironmentId": "[resourceId('Microsoft.App/managedEnvironments', variables('containerAppEnvironmentName'))]",
+                "configuration": {
+                    "ingress": {
+                        "external": true,
+                        "targetPort": 80,
+                        "allowInsecure": false
+                    },
+                    "registries": [
+                        {
+                            "server": "[concat(variables('containerRegistryName'), '.azurecr.io')]",
+                            "username": "[variables('containerRegistryName')]",
+                            "passwordSecretRef": "registry-password"
+                        }
+                    ],
+                    "secrets": [
+                        {
+                            "name": "registry-password",
+                            "value": "[listCredentials(resourceId('Microsoft.ContainerRegistry/registries', variables('containerRegistryName')), '2023-07-01').passwords[0].value]"
+                        }
+                    ]
+                },
+                "template": {
+                    "containers": [
+                        {
+                            "name": "frontend",
+                            "image": "[concat(variables('containerRegistryName'), '.azurecr.io/rag-frontend:', parameters('containerImageTag'))]",
+                            "env": [
+                                {
+                                    "name": "REACT_APP_API_URL",
+                                    "value": "[concat('https://', reference(resourceId('Microsoft.App/containerApps', variables('backendAppName'))).configuration.ingress.fqdn, '/api/v1')]"
+                                }
+                            ],
+                            "resources": {
+                                "cpu": 0.5,
+                                "memory": "1Gi"
+                            }
+                        }
+                    ],
+                    "scale": {
+                        "minReplicas": 1,
+                        "maxReplicas": 3
+                    }
+                }
+            }
+        }
+    ],
+    "outputs": {
+        "frontendUrl": {
+            "type": "string",
+            "value": "[concat('https://', reference(resourceId('Microsoft.App/containerApps', variables('frontendAppName'))).configuration.ingress.fqdn)]"
+        },
+        "backendUrl": {
+            "type": "string",
+            "value": "[concat('https://', reference(resourceId('Microsoft.App/containerApps', variables('backendAppName'))).configuration.ingress.fqdn)]"
+        },
+        "containerRegistryName": {
+            "type": "string",
+            "value": "[variables('containerRegistryName')]"
+        },
+        "storageAccountName": {
+            "type": "string",
+            "value": "[variables('storageAccountName')]"
+        }
+    }
+}
